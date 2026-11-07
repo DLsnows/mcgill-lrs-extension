@@ -187,9 +187,11 @@ function updateDownloadProgress(progress) {
   const pctText = progress.pct !== null ? `${progress.pct}%` : '';
   const sizeText = `${receivedMB}/${totalMB} MB`;
   const barPct = progress.pct !== null ? progress.pct : 0;
+  // Fully fetched but not yet handed to Chrome's downloads (remuxing)
+  const text = progress.pct === 100 ? `Saving… ${sizeText}` : `${pctText} ${sizeText}`;
 
   progressEl.innerHTML = `
-    <span class="rec-progress-text">${pctText} ${sizeText}</span>
+    <span class="rec-progress-text">${text}</span>
     <div class="progress-bar"><div class="progress-fill" style="width:${barPct}%"></div></div>
   `;
 }
@@ -274,7 +276,7 @@ function showKeepOpenHint() {
   const hint = document.createElement('div');
   hint.id = 'keepOpenHint';
   hint.className = 'script-hint';
-  hint.innerHTML = 'Keep the lecture tab open — the video is downloading in the background. It will appear in Chrome\'s download bar when ready.';
+  hint.innerHTML = 'Keep the lecture tab open — the video is downloading in the background. It will appear in Chrome\'s download bar when ready. If Chrome asks to allow multiple downloads, click Allow.';
   $('#recordingsList').parentElement.appendChild(hint);
 }
 

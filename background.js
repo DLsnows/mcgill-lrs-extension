@@ -333,7 +333,8 @@ function pageListenForVideo(downloadId) {
       return;
     }
 
-    report('[LRS] Received buffer (' + (e.data.buffer?.byteLength / 1e6).toFixed(1) + ' MB), triggering download...');
+    const size = e.data.buffer?.byteLength || 0;
+    report('[LRS] Received buffer (' + (size / 1e6).toFixed(1) + ' MB), triggering download...');
     try {
       let videoBuffer = e.data.buffer;
       if (typeof __LRS_REMUX === 'function') {
@@ -354,8 +355,13 @@ function pageListenForVideo(downloadId) {
       a.click();
       setTimeout(() => { URL.revokeObjectURL(blobUrl); a.remove(); }, 30000);
       report('[LRS] Download triggered: ' + e.data.filename + ' (' + (blob.size / 1e6).toFixed(1) + ' MB)');
+      window.postMessage({
+        type: '__LRS_PROGRESS__', filename: e.data.filename,
+        pct: 100, received: size, total: size, complete: true
+      }, '*');
     } catch (err) {
       report('[LRS] ERROR creating download: ' + err.message);
+      window.postMessage({ type: '__LRS_PROGRESS__', filename: e.data.filename, error: err.message }, '*');
     }
   }
 
@@ -466,14 +472,14 @@ function pageFetchVideo(url, fname, downloadId, lrsHost, idleTimeoutMs) {
 
       if (buffer.byteLength < 1000) throw new Error('Too small: ' + buffer.byteLength + ' bytes');
 
-      // Send 100% progress
+      // Fetched; "complete" is reported by whichever frame saves the file,
+      // once the download has actually been handed to Chrome.
       window.postMessage({
         type: '__LRS_PROGRESS__',
         filename: fname,
         pct: 100,
         received: received,
-        total: totalBytes,
-        complete: true
+        total: totalBytes || received
       }, '*');
 
       if (isTopFrame) {
@@ -497,6 +503,10 @@ function pageFetchVideo(url, fname, downloadId, lrsHost, idleTimeoutMs) {
         a.click();
         setTimeout(() => { URL.revokeObjectURL(blobUrl); a.remove(); }, 30000);
         report('[LRS] Download started (direct): ' + fname);
+        window.postMessage({
+          type: '__LRS_PROGRESS__', filename: fname,
+          pct: 100, received: received, total: received, complete: true
+        }, '*');
       } else {
         // Transfer ArrayBuffer to the top-level frame (zero-copy via transferable)
         window.top.postMessage({
