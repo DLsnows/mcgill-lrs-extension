@@ -618,9 +618,14 @@ async function downloadAll(recordings) {
     }
   }
   const count = results.filter(r => r.ok).length;
-  if (count === 0) return { ok: false, error: 'No downloads succeeded' };
+  // Per-recording failures, so the popup can mark those rows
+  const failures = results.filter(r => !r.ok)
+    .map(r => ({ recId: r.recId, error: r.error || 'Failed' }));
+  if (count === 0) {
+    return { ok: false, error: failures[0]?.error || 'No downloads succeeded', failures };
+  }
   // Return filename→recId pairs so popup can track progress
   const filenames = results.filter(r => r.ok && r.filename)
     .map(r => ({ filename: r.filename, recId: r.recId }));
-  return { ok: true, count, total: recordings.length, filenames };
+  return { ok: true, count, total: recordings.length, filenames, failures };
 }

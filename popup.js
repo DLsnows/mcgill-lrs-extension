@@ -253,6 +253,12 @@ async function downloadAll() {
     recordings
   });
 
+  // Rows that could not be started would otherwise stay "Queued..." forever.
+  // If nothing started, the reason is shown once on the button instead.
+  for (const { recId, error } of result?.failures || []) {
+    markRowFailed(recId, result?.ok ? error : 'Failed');
+  }
+
   if (result?.ok) {
     // Also store actual filenames from background (in case they differ)
     if (result.filenames) {
@@ -266,8 +272,21 @@ async function downloadAll() {
     btn.innerHTML = msg;
     showKeepOpenHint();
   } else {
-    btn.innerHTML = `Failed: ${result?.error || 'Unknown error'}`;
+    if (!result?.failures) {
+      for (const rec of recordings) markRowFailed(rec.id, 'Failed');
+    }
+    btn.textContent = `Failed: ${result?.error || 'Unknown error'}`;
     btn.disabled = false;
+  }
+}
+
+function markRowFailed(recId, error) {
+  const btn = $(`.btn-dl[data-id="${recId}"]`);
+  if (btn) { btn.innerHTML = getIcon('failed'); btn.className = 'btn-dl failed'; }
+  const progressEl = $(`#progress-${recId}`);
+  if (progressEl) {
+    progressEl.innerHTML = '<span class="rec-progress-text failed"></span>';
+    progressEl.firstChild.textContent = error;
   }
 }
 
