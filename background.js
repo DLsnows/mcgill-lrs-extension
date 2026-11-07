@@ -141,7 +141,9 @@ async function fetchRecordings(token, courseId) {
 //      receives the ArrayBuffer via postMessage (zero-copy transfer) and
 //      triggers <a download>; if the LRS page is itself top-level, it
 //      saves the file directly.
-//   4. Each download gets a unique ID so concurrent downloads don't clash.
+//   4. Each download gets a unique ID so concurrent downloads don't clash,
+//      and fetches inside one frame run one at a time so "Download all"
+//      doesn't hold every lecture in memory at once.
 
 const LRS_HOST = 'lrs.mcgill.ca';
 const MYCOURSES_HOST = 'mycourses2.mcgill.ca';
@@ -149,6 +151,10 @@ const MYCOURSES_HOST = 'mycourses2.mcgill.ca';
 const NO_LRS_FRAME_ERROR =
   'Lecture Recordings page not found. Open the course’s Lecture Recordings ' +
   'in myCourses, keep that tab open, then try again.';
+
+// A fetch that receives no data for this long is aborted, so one stalled
+// response can't hold up the recordings queued behind it.
+const FETCH_IDLE_TIMEOUT_MS = 60 * 1000;
 
 async function resolveMediaUrl(recording) {
   const sources = recording.sources
@@ -321,7 +327,6 @@ function pageListenForVideo(downloadId) {
     if (e.data?.type !== '__LRS_DOWNLOAD__') return;
     if (e.data.downloadId !== downloadId) return; // match by unique ID
     window.removeEventListener('message', handler);
-    clearTimeout(timer);
 
     if (e.data.error) {
       report('[LRS] ERROR from LRS frame: ' + e.data.error);
@@ -354,12 +359,9 @@ function pageListenForVideo(downloadId) {
     }
   }
 
-  // Auto-cleanup after 15 min if fetch never completes
-  const timer = setTimeout(() => {
-    window.removeEventListener('message', handler);
-    report('[LRS] Listener timed out (15 min): ' + downloadId);
-  }, 15 * 60 * 1000);
-
+  // No timeout: with "Download all" a recording can wait in the fetch queue
+  // for a long time before its buffer arrives; the fetcher always answers,
+  // with the buffer or an error.
   window.addEventListener('message', handler);
   report('[LRS] Listener ready on ' + window.location.hostname + ' for ' + downloadId);
   return { role: 'listener' };
@@ -368,7 +370,7 @@ function pageListenForVideo(downloadId) {
 // MAIN world, the lrs.mcgill.ca frame: fetches the video from the CDN (the
 // browser sets Origin: https://lrs.mcgill.ca), then saves it directly if
 // this is the top-level frame, or hands the buffer to the top-level frame.
-function pageFetchVideo(url, fname, downloadId, lrsHost) {
+function pageFetchVideo(url, fname, downloadId, lrsHost, idleTimeoutMs) {
   function report(msg) {
     console.log(msg);
     window.postMessage({ type: '__LRS_STATUS__', message: msg }, '*');
@@ -381,8 +383,18 @@ function pageFetchVideo(url, fname, downloadId, lrsHost) {
 
   async function run() {
     report('[LRS] Fetching from LRS frame: ' + fname);
+
+    // Abort if no data arrives for idleTimeoutMs (also covers the headers).
+    const controller = new AbortController();
+    let idleTimer = null;
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(), idleTimeoutMs);
+    };
+
     try {
-      const r = await fetch(url, { headers: { 'Range': 'bytes=0-' } });
+      resetIdleTimer();
+      const r = await fetch(url, { headers: { 'Range': 'bytes=0-' }, signal: controller.signal });
       report('[LRS] CDN response: status=' + r.status + ' ok=' + r.ok);
       if (!r.ok && r.status !== 206) throw new Error('CDN ' + r.status);
 
@@ -391,16 +403,29 @@ function pageFetchVideo(url, fname, downloadId, lrsHost) {
       const totalBytes = totalStr ? +totalStr : 0;
       if (totalBytes > 0) report('[LRS] Video size: ~' + (totalBytes / 1e6).toFixed(0) + ' MB');
 
-      // Stream response with progress reporting
+      // Stream the response with progress reporting. When the size is known,
+      // write straight into one pre-sized buffer so the recording isn't held
+      // in memory twice (chunks + concatenated copy).
       const reader = r.body.getReader();
+      let out = null;
+      if (totalBytes > 0) {
+        try { out = new Uint8Array(totalBytes); } catch (_) { /* fall back to chunks */ }
+      }
       const chunks = [];
       let received = 0;
       let lastProgressAt = 0;
 
       while (true) {
+        resetIdleTimer();
         const { done, value } = await reader.read();
         if (done) break;
-        chunks.push(value);
+        if (out && received + value.byteLength <= out.length) {
+          out.set(value, received);
+        } else {
+          // Size unknown or larger than announced: collect chunks instead
+          if (out) { chunks.push(out.subarray(0, received)); out = null; }
+          chunks.push(value);
+        }
         received += value.byteLength;
 
         const now = Date.now();
@@ -420,16 +445,24 @@ function pageFetchVideo(url, fname, downloadId, lrsHost) {
           }, '*');
         }
       }
+      clearTimeout(idleTimer);
 
-      // Concatenate chunks into a single ArrayBuffer
       report('[LRS] Fetch complete: ' + (received / 1e6).toFixed(1) + ' MB');
-      const buffer = new ArrayBuffer(received);
-      const view = new Uint8Array(buffer);
-      let offset = 0;
-      for (const chunk of chunks) {
-        view.set(chunk, offset);
-        offset += chunk.byteLength;
+      let buffer;
+      if (out) {
+        buffer = received === out.length ? out.buffer : out.slice(0, received).buffer;
+        out = null;
+      } else {
+        // Concatenate chunks into a single ArrayBuffer
+        buffer = new ArrayBuffer(received);
+        const view = new Uint8Array(buffer);
+        let offset = 0;
+        for (const chunk of chunks) {
+          view.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
       }
+      chunks.length = 0;
 
       if (buffer.byteLength < 1000) throw new Error('Too small: ' + buffer.byteLength + ' bytes');
 
@@ -475,25 +508,31 @@ function pageFetchVideo(url, fname, downloadId, lrsHost) {
         report('[LRS] ArrayBuffer transferred to parent frame');
       }
     } catch (e) {
-      report('[LRS] ERROR: ' + e.message);
+      clearTimeout(idleTimer);
+      const message = e.name === 'AbortError'
+        ? 'No data from the server for ' + Math.round(idleTimeoutMs / 1000) + ' s'
+        : e.message;
+      report('[LRS] ERROR: ' + message);
       window.postMessage({
         type: '__LRS_PROGRESS__',
         filename: fname,
-        error: e.message
+        error: message
       }, '*');
       if (!isTopFrame) {
         try {
           window.top.postMessage({
             type: '__LRS_DOWNLOAD__',
             downloadId: downloadId,
-            error: e.message
+            error: message
           }, '*');
         } catch (_) {}
       }
     }
   }
 
-  run();
+  // One fetch at a time per frame: each recording is buffered in memory in
+  // full, so running "Download all" concurrently would exhaust the tab.
+  window.__LRS_FETCH_QUEUE = (window.__LRS_FETCH_QUEUE || Promise.resolve()).then(run, run);
   return { role: 'fetcher' };
 }
 
@@ -541,7 +580,7 @@ async function downloadRecording(recording) {
       target: { tabId, frameIds: [frameId] },
       world: 'MAIN',
       func: pageFetchVideo,
-      args: [mediaUrl, filename, dlId, LRS_HOST]
+      args: [mediaUrl, filename, dlId, LRS_HOST, FETCH_IDLE_TIMEOUT_MS]
     });
 
     if (fetchResult?.result?.role !== 'fetcher') {
