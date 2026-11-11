@@ -1,5 +1,10 @@
 # McGill LRS Downloader
 
+> **Unofficial interim build (2.0.0.1).** The original extension fails with "LRS frame not found. Open a lecture page first" when more than one myCourses tab is open. This fork fixes that. The fix has been proposed to the original extension in [hanzili/mcgill-lrs-extension#1](https://github.com/hanzili/mcgill-lrs-extension/pull/1).
+>
+> - Download it from [Releases](https://github.com/DLsnows/mcgill-lrs-extension/releases).
+> - Once the original extension includes the fix, please switch back to [the original](https://github.com/hanzili/mcgill-lrs-extension).
+
 A Chrome extension that downloads lecture recordings from McGill's Lecture Recording System (LRS). Downloads play natively on macOS, Windows, and Linux — no additional software needed.
 
 ## Features
